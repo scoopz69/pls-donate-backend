@@ -1,105 +1,91 @@
-from flask import Flask, jsonify
 import requests
+from flask import Flask, jsonify
 
 app = Flask(__name__)
 
-# Roproxy v2 host (din vens stil)
-ROXY_BASE = "https://roxytheproxy.com"
+# Roproxy V2 base
+ROPROXY_V2 = "https://games.roproxy.com"
 
-
-def safe_get_json(url: str, timeout: int = 8):
-    """GET + JSON med simpel fejl-håndtering."""
+def safe_get_json(url, params=None, timeout=10):
     try:
-        r = requests.get(url, timeout=timeout)
+        r = requests.get(url, params=params, timeout=timeout)
         r.raise_for_status()
         return r.json()
     except Exception as e:
-        print("HTTP error:", url, "->", e)
+        print(f"HTTP error: {url} -> {e}")
         return None
 
+# 1. Get universes owned by user
+def get_user_universes(user_id: int):
+    url = f"{ROPROXY_V2}/v2/users/{user_id}/games"
+    params = {
+        "accessFilter": 2,
+        "limit": 50,
+        "sortOrder": "Asc"
+    }
 
-def fetch_gamepasses_for_user(user_id: int):
-    """
-    Henter ALLE gamepasses for alle offentlige games som brugeren ejer.
-    Kun gamepasses, ingen tøj.
-    """
-    gamepasses = []
+    data = safe_get_json(url, params=params)
+    if not data:
+        return []
 
-    # 1) Hent alle public games for user
-    games_url = (
-        f"{ROXY_BASE}/games.roblox.com/v2/users/{user_id}/games"
-        "?accessFilter=2&limit=50&sortOrder=Asc"
-    )
-    games_data = safe_get_json(games_url)
-    if not games_data:
-        return gamepasses
+    universes = []
+    for g in data.get("data", []):
+        if "id" in g:
+            universes.append(g["id"])
 
-    games = games_data.get("data") or []
-    for g in games:
-        universe_id = g.get("id")
-        if not universe_id:
+    return universes
+
+# 2. Get gamepasses for a universe
+def get_gamepasses(universe_id: int):
+    url = f"{ROPROXY_V2}/v1/games/{universe_id}/game-passes"
+    params = {
+        "limit": 100,
+        "sortOrder": "Asc"
+    }
+
+    data = safe_get_json(url, params=params)
+    if not data:
+        return []
+
+    passes = []
+    for p in data.get("data", []):
+        gp_id = p.get("id")
+        name = p.get("name") or "Gamepass"
+        product = p.get("product") or {}
+
+        price = product.get("price") or product.get("PriceInRobux") or 0
+        if not gp_id or price <= 0:
             continue
 
-        # 2) Hent gamepasses for hvert universe
-        gp_url = (
-            f"{ROXY_BASE}/games.roblox.com/v1/games/{universe_id}/game-passes"
-            "?limit=100&sortOrder=Asc"
-        )
-        gp_data = safe_get_json(gp_url)
-        if not gp_data:
-            continue
+        passes.append({
+            "id": gp_id,
+            "name": name,
+            "price": price,
+            "type": "gamepass"
+        })
 
-        for gp in gp_data.get("data", []):
-            gp_id = gp.get("id")
-            name = gp.get("name") or "Gamepass"
-            product = gp.get("product") or {}
-            price = (
-                product.get("price")
-                or product.get("PriceInRobux")
-                or 0
-            )
+    return passes
 
-            if gp_id is None or price is None:
-                continue
-
-            # Kun gamepasses med pris > 0
-            if int(price) <= 0:
-                continue
-
-            gamepasses.append(
-                {
-                    "id": int(gp_id),
-                    "name": str(name),
-                    "price": int(price),
-                    "type": "gamepass",
-                }
-            )
-
-    # Sorter efter pris
-    gamepasses.sort(key=lambda x: x["price"])
-    return gamepasses
-
-
+# 3. Combined endpoint
 @app.route("/user/<int:user_id>/items")
-def get_user_items(user_id: int):
-    """
-    Simpelt endpoint:
-    /user/<id>/items  ->  { userId, items[] }
-    items = KUN gamepasses (id, name, price, type="gamepass")
-    """
-    items = fetch_gamepasses_for_user(user_id)
-    return jsonify(
-        {
-            "userId": user_id,
-            "items": items,
-        }
-    )
+def get_items(user_id: int):
+    universes = get_user_universes(user_id)
 
+    all_passes = []
+    for univ in universes:
+        gp = get_gamepasses(univ)
+        all_passes.extend(gp)
+
+    all_passes.sort(key=lambda x: x["price"])
+
+    return jsonify({
+        "userId": user_id,
+        "items": all_passes
+    })
 
 @app.route("/")
 def root():
-    return "PLS DONATE backend OK (gamepasses only via roxytheproxy.com)", 200
-
+    return "PLS Donate Backend OK (Roproxy v2 Gamepass API)"
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8000)
